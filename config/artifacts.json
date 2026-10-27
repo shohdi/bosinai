@@ -1,0 +1,11 @@
+{
+  "runtime_release": "prism-b10709-9a9394a",
+  "runtime_repository": "https://github.com/PrismML-Eng/llama.cpp",
+  "runtime_cuda": "12.4",
+  "runtime_sha256": "f565c8428c1f108311f65ed97f02425188b3aa3c745c2bc597521bbd24bcbbc9",
+  "cudart_sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+  "model_repository": "prism-ml/Ternary-Bonsai-2-27B-gguf",
+  "model_filename": "Ternary-Bonsai-2-27B-PTQ1_0.gguf",
+  "model_sha256": "53107f530aa52eb00912263ab1ee29bd199261c87cd7b4ad4ca1318c1fe33ee3",
+  "model_size": 5946648928
+}

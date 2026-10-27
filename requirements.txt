@@ -1,0 +1,10 @@
+mcp>=1.28,<2
+httpx==0.28.1
+openpyxl==3.1.5
+web3>=7,<8
+keyring==25.7.0
+playwright==1.63.0
+feedparser==6.0.14
+pytest>=9,<10
+starlette==1.6.0
+uvicorn==0.53.0

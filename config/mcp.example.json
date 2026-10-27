@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "trading": {
+      "command": ".venv/Scripts/python.exe",
+      "args": ["src/trading_mcp.py"]
+    },
+    "research": {
+      "command": ".venv/Scripts/python.exe",
+      "args": ["src/research_mcp.py"]
+    }
+  }
+}

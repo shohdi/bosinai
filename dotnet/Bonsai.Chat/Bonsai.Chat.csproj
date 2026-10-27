@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LlamaSharpVersion>0.30.0</LlamaSharpVersion>
+    <LlamaBackend Condition="'$(LlamaBackend)' == ''">Cpu</LlamaBackend>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="LLamaSharp" Version="$(LlamaSharpVersion)" />
+    <PackageReference Include="LLamaSharp.Backend.$(LlamaBackend)" Version="$(LlamaSharpVersion)" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Remove="App_Data/**" />
+    <None Remove="App_Data/**" />
+  </ItemGroup>
+</Project>

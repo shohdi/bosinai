@@ -1,0 +1,17 @@
+{
+  "model_url": "http://127.0.0.1:8080",
+  "context_tokens": 32768,
+  "max_output_tokens": 1800,
+  "context_safety_margin_tokens": 512,
+  "tool_result_chars": 24576,
+  "rpc_url": "https://bsc-dataseed.bnbchain.org",
+  "chain_id": 56,
+  "usdt": "0x55d398326f99059fF775485246999027B3197955",
+  "oneinch_url": "https://api.1inch.com/swap/v6.1/56",
+  "max_order_usdt": "25",
+  "paper_start_usdt": "1000",
+  "paper_fee_bps": 30,
+  "max_turns": 10,
+  "interval_seconds": 600,
+  "research_domains": ["news.google.com", "www.reuters.com", "www.cnbc.com", "finance.yahoo.com", "www.sec.gov", "www.reddit.com", "www.google.com", "x.com", "www.nasdaq.com", "stocktwits.com"]
+}
