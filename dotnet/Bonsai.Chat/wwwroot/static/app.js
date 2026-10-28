@@ -244,14 +244,20 @@
     }
   }
 
-  function markdown(content) {
+  function markdown(content, literalHtml = false) {
     const body = document.createElement('div');
     body.className = 'markdown';
     if (!window.marked || !window.DOMPurify) {
       body.textContent = content;
       return body;
     }
-    body.innerHTML = DOMPurify.sanitize(marked.parse(content, { gfm: true, breaks: false }), {
+    const options = { gfm: true, breaks: false };
+    if (literalHtml) {
+      const renderer = new marked.Renderer();
+      renderer.html = ({ text }) => `<span class="literal-html">${text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}</span>`;
+      options.renderer = renderer;
+    }
+    body.innerHTML = DOMPurify.sanitize(marked.parse(content, options), {
       USE_PROFILES: { html: true },
       FORBID_TAGS: ['style', 'form', 'input', 'button', 'textarea', 'select', 'iframe', 'object', 'embed'],
       FORBID_ATTR: ['style', 'id', 'name'],
@@ -309,7 +315,7 @@
       heading.append(avatar, document.createTextNode('Bonsai'));
       article.append(heading);
     }
-    article.append(markdown(message.content || ''));
+    article.append(markdown(message.content || '', !assistant));
     if (assistant && message.content) {
       const actions = document.createElement('div');
       actions.className = 'message-actions';

@@ -6,6 +6,8 @@ the original chat server, its MCP services, or its configuration.
 The existing browser interface is served by ASP.NET Core, including sanitized
 Markdown, tables, highlighted code, copy buttons, searchable dated history,
 rename/delete, drafts, responsive navigation, live replies, and cancellation.
+HTML-like text in user messages is displayed literally, keeping pasted code and
+placeholders visible alongside Markdown formatting.
 Conversations are saved as JSON under `Bonsai.Chat/App_Data/sessions`. Each complete
 user/assistant turn is saved atomically; stopped or failed turns leave previous
 history intact. Separate conversations share a bounded inference queue.
@@ -23,7 +25,9 @@ to exist independently. The C# app does not need the original source directories
 The provisioned Windows site is in `Published`, with its own .NET/ASP.NET Core
 8.0.33 runtime. It runs without the .NET SDK. Its conversations and model selection
 are stored in `Published/App_Data`; the source project uses its own `App_Data`.
-The app listens on <http://localhost:5080>. `Start-Chat.cmd` launches the site.
+The app listens on <http://localhost:5080>. `Start-Chat.cmd` refreshes the published
+browser files from this checkout before launching the site, preserving installed
+settings, models, and chats. A standalone published directory uses its bundled files.
 The same server exposes `GET /v1/models`, `POST /v1/responses` for Codex CLI,
 and `POST /v1/chat/completions` for OpenCode. Browser and API turns share a
 single bounded queue and the same loaded model. Use model ID `local` to follow
