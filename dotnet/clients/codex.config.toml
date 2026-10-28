@@ -1,8 +1,7 @@
-# Use this as a separate Codex config/profile. The API shares the model selected in the web UI.
-model = "local"
+# Base configuration for the local API. Select Bonsai in the web interface first.
+model = "bonsai"
 model_provider = "bosinai"
-# Safe for either current model. For Bonsai-only sessions, use its context_window from /v1/models.
-model_context_window = 57344
+model_context_window = 262144
 web_search = "disabled"
 
 [model_providers.bosinai]

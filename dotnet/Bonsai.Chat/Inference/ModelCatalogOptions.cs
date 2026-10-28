@@ -8,7 +8,6 @@ public sealed class ModelCatalogOptions
     public string BonsaiModelPath { get; set; } = "";
     public string BonsaiRuntimePath { get; set; } = "";
     public uint BonsaiContextSize { get; set; } = 8192;
-    public int BonsaiMaxTokens { get; set; } = 1800;
     public int BonsaiGpuLayerCount { get; set; } = 99;
     public int BonsaiStartupTimeoutSeconds { get; set; } = 180;
     public string BonsaiCacheTypeK { get; set; } = "f16";

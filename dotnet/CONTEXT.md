@@ -21,10 +21,19 @@ the native runtime reported 2,140 MiB of GPU memory free. Its KV cache uses
 4,608 MiB, plus about 150 MiB of recurrent state. This is the model's training
 context limit. Higher GPU offload left too little GPU or commit headroom.
 
-Context includes the prompt, conversation, and reserved response tokens. The app
-reserves 1,800 output tokens and a 128-token safety margin. It counts the actual
-formatted prompt before generation and preserves history when the input is too
-large. Old messages are never silently discarded.
+Context includes both input and generated output. The web app and both coding
+APIs count the complete formatted input (instructions, history, tool definitions
+and results) and keep it within half the configured context: 131,072 tokens for
+Bonsai and 28,672 for DeepSeek. Overflow removes the oldest turns first, then
+keeps the tail of remaining message text. Stored web history is preserved; tool
+call/result pairs, caller instructions and schemas stay intact. Instructions or
+tool data that cannot fit without corruption are rejected.
+
+There is no fixed output cap. Replies can use all remaining context except a
+128-token safety margin, unless the API caller explicitly requests a smaller
+maximum. At a full half-window input this leaves 130,944 Bonsai output tokens
+or 28,544 DeepSeek output tokens; shorter input allows longer output. Generation
+can finish earlier when the model emits its end token, or when cancelled.
 
 The probes validate cache allocation and short replies, rather than retrieval
 accuracy over a fully populated context. Large conversations and Bonsai's CPU

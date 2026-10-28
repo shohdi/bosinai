@@ -40,9 +40,9 @@ public sealed class BonsaiChatModel : IChatModel, IAsyncDisposable
         _systemPrompt = systemPrompt;
         _safetyMargin = safetyMargin;
         _logger = logger;
-        if (_options.BonsaiContextSize < 512 || _options.BonsaiMaxTokens <= 0 ||
-            _options.BonsaiMaxTokens + _safetyMargin >= _options.BonsaiContextSize)
-            throw new ArgumentException("Bonsai context must exceed its maximum reply plus the safety margin.");
+        if (_options.BonsaiContextSize < 512 || _safetyMargin < 0 ||
+            _safetyMargin >= _options.BonsaiContextSize / 2)
+            throw new ArgumentException("Bonsai safety margin must leave room for a reply after half-window input.");
         if (_options.BonsaiCacheTypeK is not ("f16" or "q8_0" or "q4_0") ||
             _options.BonsaiCacheTypeV is not ("f16" or "q8_0" or "q4_0"))
             throw new ArgumentException("Bonsai cache types must be f16, q8_0 or q4_0.");
@@ -84,65 +84,11 @@ public sealed class BonsaiChatModel : IChatModel, IAsyncDisposable
         if (messages.Count == 0 || messages[^1].Role != "user" ||
             messages.Any(message => message.Role is not ("user" or "assistant") || message.Content is null))
             throw new ArgumentException("Chat messages must contain user/assistant text and end with a user message.");
-        var client = await EnsureStartedAsync(cancellationToken);
-        var history = new List<object>();
-        if (!string.IsNullOrWhiteSpace(_systemPrompt)) history.Add(new { role = "system", content = _systemPrompt });
-        history.AddRange(messages.Select(message => (object)new { role = message.Role, content = message.Content }));
-        var templateSettings = new { enable_thinking = false };
-
-        using var templateResponse = await client.PostAsJsonAsync("apply-template",
-            new { messages = history, chat_template_kwargs = templateSettings }, cancellationToken);
-        await EnsureSuccessAsync(templateResponse, cancellationToken);
-        using var template = await JsonDocument.ParseAsync(await templateResponse.Content.ReadAsStreamAsync(cancellationToken),
-            cancellationToken: cancellationToken);
-        var prompt = template.RootElement.GetProperty("prompt").GetString();
-        using var tokenResponse = await client.PostAsJsonAsync("tokenize",
-            new { content = prompt, add_special = true }, cancellationToken);
-        await EnsureSuccessAsync(tokenResponse, cancellationToken);
-        using var tokenDocument = await JsonDocument.ParseAsync(await tokenResponse.Content.ReadAsStreamAsync(cancellationToken),
-            cancellationToken: cancellationToken);
-        var inputTokens = tokenDocument.RootElement.GetProperty("tokens").GetArrayLength();
-        var inputBudget = (int)_options.BonsaiContextSize - _options.BonsaiMaxTokens - _safetyMargin;
-        if (inputTokens > inputBudget)
-            throw new InvalidOperationException($"Context full: this conversation needs {inputTokens:N0} input tokens, " +
-                $"but the safe input limit is {inputBudget:N0}. Start a new chat. Your history has been kept intact.");
-
-        using var request = new HttpRequestMessage(HttpMethod.Post, "v1/chat/completions")
-        {
-            Content = JsonContent.Create(new
-            {
-                model = "bonsai-local", messages = history, stream = true,
-                temperature = 0.7, top_p = 0.8, top_k = 20, min_p = 0,
-                max_tokens = _options.BonsaiMaxTokens, cache_prompt = false,
-                chat_template_kwargs = templateSettings,
-            }),
-        };
-        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        await EnsureSuccessAsync(response, cancellationToken);
-        using var reader = new StreamReader(await response.Content.ReadAsStreamAsync(cancellationToken));
-        var finished = false;
-        while (await reader.ReadLineAsync(cancellationToken) is { } line)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
-            var payload = line[5..].Trim();
-            if (payload == "[DONE]") yield break;
-            if (payload.Length == 0) continue;
-            using var document = JsonDocument.Parse(payload);
-            if (document.RootElement.TryGetProperty("error", out var error))
-                throw new InvalidOperationException("Bonsai generation failed: " + error);
-            if (!document.RootElement.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
-                continue;
-            if (choices[0].TryGetProperty("finish_reason", out var finishReason) &&
-                finishReason.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(finishReason.GetString()))
-                finished = true;
-            if (choices[0].TryGetProperty("delta", out var delta) &&
-                delta.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.String &&
-                content.GetString() is { Length: > 0 } text)
-                yield return text;
-        }
-        if (!finished)
-            throw new InvalidOperationException("The Bonsai response ended before completion. Retry your message; your saved history has been kept intact.");
+        var input = new List<ModelMessage>();
+        if (!string.IsNullOrWhiteSpace(_systemPrompt)) input.Add(new("system", _systemPrompt));
+        input.AddRange(messages.Select(message => new ModelMessage(message.Role, message.Content)));
+        await foreach (var delta in CompleteAsync(new ModelRequest(input, Temperature: 0.7f), cancellationToken))
+            if (delta.Text is { Length: > 0 } text) yield return text;
     }
 
     public async IAsyncEnumerable<ModelDelta> CompleteAsync(ModelRequest request,
@@ -151,51 +97,12 @@ public sealed class BonsaiChatModel : IChatModel, IAsyncDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ModelToolProtocol.ValidateRequest(request);
         var client = await EnsureStartedAsync(cancellationToken);
-        var history = ModelToolProtocol.NormalizeSystemMessages(request.Messages).Select(message =>
-        {
-            var item = new Dictionary<string, object?> { ["role"] = message.Role, ["content"] = message.Content };
-            if (message.ToolCallId is not null) item["tool_call_id"] = message.ToolCallId;
-            if (message.ToolCalls is { Count: > 0 })
-                item["tool_calls"] = message.ToolCalls.Select(call => new
-                {
-                    id = call.Id, type = "function", function = new { name = call.Name, arguments = call.Arguments },
-                }).ToArray();
-            return item;
-        }).ToArray();
-        var maxTokens = Math.Min(request.MaxTokens ?? _options.BonsaiMaxTokens, _options.BonsaiMaxTokens);
-        var body = new Dictionary<string, object?>
-        {
-            ["model"] = "bonsai-local", ["messages"] = history, ["stream"] = true,
-            ["stream_options"] = new { include_usage = true },
-            ["temperature"] = request.Temperature ?? 0.7f, ["top_p"] = 0.8, ["top_k"] = 20, ["min_p"] = 0,
-            ["max_tokens"] = maxTokens, ["cache_prompt"] = false,
-            ["chat_template_kwargs"] = new { enable_thinking = false },
-        };
-        if (request.Tools is { Count: > 0 })
-        {
-            body["tools"] = request.Tools.Select(tool => new
-            {
-                type = "function", function = new { name = tool.Name, description = tool.Description, parameters = tool.Parameters },
-            }).ToArray();
-            body["tool_choice"] = request.ForcedToolName is { } forced
-                ? (object)new { type = "function", function = new { name = forced } } : request.ToolChoice;
-        }
-        // Apply the same native template, including tool definitions, before checking the full context budget.
-        using var templateResponse = await client.PostAsJsonAsync("apply-template", body, cancellationToken);
-        await EnsureSuccessAsync(templateResponse, cancellationToken);
-        using var template = await JsonDocument.ParseAsync(await templateResponse.Content.ReadAsStreamAsync(cancellationToken),
-            cancellationToken: cancellationToken);
-        var prompt = template.RootElement.GetProperty("prompt").GetString();
-        using var tokenResponse = await client.PostAsJsonAsync("tokenize",
-            new { content = prompt, add_special = true }, cancellationToken);
-        await EnsureSuccessAsync(tokenResponse, cancellationToken);
-        using var tokenDocument = await JsonDocument.ParseAsync(await tokenResponse.Content.ReadAsStreamAsync(cancellationToken),
-            cancellationToken: cancellationToken);
-        var inputTokens = tokenDocument.RootElement.GetProperty("tokens").GetArrayLength();
-        var inputBudget = (int)_options.BonsaiContextSize - maxTokens - _safetyMargin;
-        if (inputTokens > inputBudget)
-            throw new InvalidOperationException($"Context full: this request needs {inputTokens:N0} input tokens, " +
-                $"but the safe input limit is {inputBudget:N0}. Reduce the request or compact the client history.");
+        request = await ModelContextPolicy.PrepareAsync(request, (int)_options.BonsaiContextSize,
+            (candidate, token) => CountInputTokensAsync(client, CreateCompletionBody(candidate), token), cancellationToken);
+        var body = CreateCompletionBody(request);
+        var inputTokens = await CountInputTokensAsync(client, body, cancellationToken);
+        body["max_tokens"] = ModelContextPolicy.RemainingOutputTokens(
+            (int)_options.BonsaiContextSize, inputTokens, _safetyMargin, request.MaxTokens);
 
         using var nativeRequest = new HttpRequestMessage(HttpMethod.Post, "v1/chat/completions")
         {
@@ -270,6 +177,54 @@ public sealed class BonsaiChatModel : IChatModel, IAsyncDisposable
             throw new InvalidOperationException("The local model returned a tool call without supplied tool definitions.");
         if (toolCalls.Count > 0 && finishReason == "stop") finishReason = "tool_calls";
         yield return new ModelDelta(FinishReason: finishReason, InputTokens: inputTokens, OutputTokens: outputTokens);
+    }
+
+    private static Dictionary<string, object?> CreateCompletionBody(ModelRequest request)
+    {
+        var history = ModelToolProtocol.NormalizeSystemMessages(request.Messages).Select(message =>
+        {
+            var item = new Dictionary<string, object?> { ["role"] = message.Role, ["content"] = message.Content };
+            if (message.ToolCallId is not null) item["tool_call_id"] = message.ToolCallId;
+            if (message.ToolCalls is { Count: > 0 })
+                item["tool_calls"] = message.ToolCalls.Select(call => new
+                {
+                    id = call.Id, type = "function", function = new { name = call.Name, arguments = call.Arguments },
+                }).ToArray();
+            return item;
+        }).ToArray();
+        var body = new Dictionary<string, object?>
+        {
+            ["model"] = "bonsai-local", ["messages"] = history, ["stream"] = true,
+            ["stream_options"] = new { include_usage = true },
+            ["temperature"] = request.Temperature ?? 0.7f, ["top_p"] = 0.8, ["top_k"] = 20, ["min_p"] = 0,
+            ["cache_prompt"] = false, ["chat_template_kwargs"] = new { enable_thinking = false },
+        };
+        if (request.Tools is { Count: > 0 })
+        {
+            body["tools"] = request.Tools.Select(tool => new
+            {
+                type = "function", function = new { name = tool.Name, description = tool.Description, parameters = tool.Parameters },
+            }).ToArray();
+            body["tool_choice"] = request.ForcedToolName is { } forced
+                ? (object)new { type = "function", function = new { name = forced } } : request.ToolChoice;
+        }
+        return body;
+    }
+
+    private static async Task<int> CountInputTokensAsync(HttpClient client, object body, CancellationToken cancellationToken)
+    {
+        // Count the exact native template, including instructions, tools, and special tokens.
+        using var templateResponse = await client.PostAsJsonAsync("apply-template", body, cancellationToken);
+        await EnsureSuccessAsync(templateResponse, cancellationToken);
+        using var template = await JsonDocument.ParseAsync(await templateResponse.Content.ReadAsStreamAsync(cancellationToken),
+            cancellationToken: cancellationToken);
+        var prompt = template.RootElement.GetProperty("prompt").GetString();
+        using var tokenResponse = await client.PostAsJsonAsync("tokenize",
+            new { content = prompt, add_special = true }, cancellationToken);
+        await EnsureSuccessAsync(tokenResponse, cancellationToken);
+        using var tokenDocument = await JsonDocument.ParseAsync(await tokenResponse.Content.ReadAsStreamAsync(cancellationToken),
+            cancellationToken: cancellationToken);
+        return tokenDocument.RootElement.GetProperty("tokens").GetArrayLength();
     }
 
     private async Task<HttpClient> EnsureStartedAsync(CancellationToken cancellationToken)

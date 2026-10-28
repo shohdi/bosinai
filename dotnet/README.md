@@ -34,12 +34,18 @@ The `.sln` includes the web project and integration tests. Configuration is in
 `Bonsai.Chat/appsettings.json`; all paths are resolved against the C# project,
 not the shell's working directory. No browser assets require a CDN.
 
-The full conversation is passed to the selected model. Requests that exceed its
-token budget are rejected with a message to start a new chat; earlier turns are
-never silently removed. The app has no browsing tools. The local API accepts only
-loopback hostnames and rejects foreign browser origins.
+Web and API prompts use at most half the selected model's context, including
+history, instructions, tools, and template overhead. Older prompt content is
+trimmed from the start while keeping the latest input and valid tool exchanges;
+saved browser history remains intact. Required instructions/tools that cannot
+fit are rejected. Replies may use the remaining context minus a 128-token safety
+reserve, without a fixed 1,800-token cap. An explicit API response maximum is
+respected. The web chat has no browsing tools. The local API accepts only loopback
+hostnames and rejects foreign browser origins.
 
-The configured context windows are 56K for DeepSeek and 256K for Bonsai, verified
+The configured context windows are 57,344 for DeepSeek and 262,144 for Bonsai,
+with input budgets of 28,672 and 131,072 respectively. The client examples
+advertise each model's full window. These context allocations were verified
 with real cache allocations and replies on this PC. The interface shows the
 current limit. [Context verification](CONTEXT.md) records placement and headroom.
 

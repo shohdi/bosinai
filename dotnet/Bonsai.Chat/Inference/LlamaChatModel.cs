@@ -34,8 +34,8 @@ public sealed class LlamaChatModel : IChatModel, IAsyncDisposable
         Validator.ValidateObject(_options, new ValidationContext(_options), validateAllProperties: true);
         if (!float.IsFinite(_options.Temperature) || !float.IsFinite(_options.TopP))
             throw new ValidationException("Llama sampling options must be finite numbers.");
-        if (_options.MaxTokens + _options.SafetyMarginTokens >= _options.ContextSize)
-            throw new ValidationException("Llama ContextSize must exceed MaxTokens plus SafetyMarginTokens.");
+        if (_options.SafetyMarginTokens >= _options.ContextSize / 2)
+            throw new ValidationException("Llama safety margin must leave room for a reply after half-window input.");
         if (_options.ChatTemplate is not ("DeepSeekCoderV2" or "Model"))
             throw new ValidationException("Llama ChatTemplate must be DeepSeekCoderV2 or Model.");
         if (_options.CacheTypeV != "F16" && _options.FlashAttention != true)
@@ -84,71 +84,12 @@ public sealed class LlamaChatModel : IChatModel, IAsyncDisposable
         if (messages.Any(message => message.Role is not ("user" or "assistant") || message.Content is null))
             throw new ArgumentException("Chat messages must contain user or assistant text.", nameof(messages));
 
-        await _gate.WaitAsync(cancellationToken);
-        try
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            cancellationToken.ThrowIfCancellationRequested();
-            var weights = await LoadAsync(cancellationToken);
-            var prompt = FormatPrompt(weights, messages);
-
-            // Some embedded templates already include BOS. Avoid adding it twice.
-            var bos = weights.Vocab.LLamaTokenToString(weights.Vocab.BOS, isSpecialToken: true);
-            var addBos = string.IsNullOrEmpty(bos) || !prompt.StartsWith(bos, StringComparison.Ordinal);
-            var tokens = weights.Tokenize(prompt, add_bos: addBos, special: true, Encoding.UTF8);
-            var inputBudget = (int)_options.ContextSize - _options.MaxTokens - _options.SafetyMarginTokens;
-            if (tokens.Length > inputBudget)
-                throw new InvalidOperationException(
-                    $"Context full: this conversation needs {tokens.Length:N0} input tokens, but the safe input limit is " +
-                    $"{inputBudget:N0}. Start a new chat or increase Llama:ContextSize. Your history has been kept intact.");
-
-            cancellationToken.ThrowIfCancellationRequested();
-            using var context = weights.CreateContext(CreateParameters(), _logger);
-            using var sampling = new DefaultSamplingPipeline
-            {
-                Temperature = _options.Temperature,
-                TopP = _options.TopP,
-            };
-            var batch = new LLamaBatch();
-            var decoder = new StreamingTokenDecoder(context) { DecodeSpecialTokens = false };
-
-            // Decode bounded prompt batches so stopping also works during long prefills.
-            var batchSize = (int)context.BatchSize;
-            for (var offset = 0; offset < tokens.Length; offset += batchSize)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                batch.Clear();
-                var end = Math.Min(offset + batchSize, tokens.Length);
-                for (var index = offset; index < end; index++)
-                    batch.Add(tokens[index], index, LLamaSeqId.Zero, logits: index == tokens.Length - 1);
-                await DecodeAsync(context, batch, cancellationToken);
-            }
-
-            var position = tokens.Length;
-            for (var generated = 0; generated < _options.MaxTokens; generated++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var token = sampling.Sample(context.NativeHandle, batch.TokenCount - 1);
-                if (token.IsEndOfGeneration(weights.Vocab))
-                    yield break;
-
-                decoder.Add(token);
-                var chunk = decoder.Read();
-                if (chunk.Length > 0)
-                    yield return chunk;
-
-                if (generated + 1 == _options.MaxTokens)
-                    break;
-                cancellationToken.ThrowIfCancellationRequested();
-                batch.Clear();
-                batch.Add(token, position++, LLamaSeqId.Zero, logits: true);
-                await DecodeAsync(context, batch, cancellationToken);
-            }
-        }
-        finally
-        {
-            _gate.Release();
-        }
+        var input = new List<ModelMessage>();
+        if (!string.IsNullOrWhiteSpace(_options.SystemPrompt))
+            input.Add(new("system", _options.SystemPrompt));
+        input.AddRange(messages.Select(message => new ModelMessage(message.Role, message.Content)));
+        await foreach (var delta in CompleteAsync(new ModelRequest(input, Temperature: _options.Temperature), cancellationToken))
+            if (delta.Text is { Length: > 0 } text) yield return text;
     }
 
     public async IAsyncEnumerable<ModelDelta> CompleteAsync(ModelRequest request,
@@ -160,17 +101,17 @@ public sealed class LlamaChatModel : IChatModel, IAsyncDisposable
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             var weights = await LoadAsync(cancellationToken);
-            // Agent instructions belong to this request; the web chat's default prompt is not injected.
-            var adapted = ModelToolProtocol.FormatMessages(request);
-            var prompt = FormatPrompt(weights, adapted.SystemPrompt, adapted.Messages);
-            var maxTokens = Math.Min(request.MaxTokens ?? _options.MaxTokens, _options.MaxTokens);
-            var bos = weights.Vocab.LLamaTokenToString(weights.Vocab.BOS, isSpecialToken: true);
-            var addBos = string.IsNullOrEmpty(bos) || !prompt.StartsWith(bos, StringComparison.Ordinal);
-            var tokens = weights.Tokenize(prompt, add_bos: addBos, special: true, Encoding.UTF8);
-            var inputBudget = (int)_options.ContextSize - maxTokens - _options.SafetyMarginTokens;
-            if (tokens.Length > inputBudget)
-                throw new InvalidOperationException($"Context full: this request needs {tokens.Length:N0} input tokens, " +
-                    $"but the safe input limit is {inputBudget:N0}. Reduce the request or compact the client history.");
+            // Count the actual rendered prompt, including instructions and tool definitions.
+            // Agent instructions belong to this request; the web default is supplied only by GenerateAsync.
+            request = await ModelContextPolicy.PrepareAsync(request, (int)_options.ContextSize,
+                (candidate, token) =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    return Task.FromResult(TokenizeRequest(weights, candidate).Length);
+                }, cancellationToken);
+            var tokens = TokenizeRequest(weights, request);
+            var maxTokens = ModelContextPolicy.RemainingOutputTokens(
+                (int)_options.ContextSize, tokens.Length, _options.SafetyMarginTokens, request.MaxTokens);
 
             cancellationToken.ThrowIfCancellationRequested();
             using var context = weights.CreateContext(CreateParameters(), _logger);
@@ -290,8 +231,15 @@ public sealed class LlamaChatModel : IChatModel, IAsyncDisposable
         _ => throw new ValidationException("Unsupported KV cache type: " + value),
     };
 
-    private string FormatPrompt(LLamaWeights weights, IReadOnlyList<InferenceMessage> messages)
-        => FormatPrompt(weights, _options.SystemPrompt, messages);
+    private LLamaToken[] TokenizeRequest(LLamaWeights weights, ModelRequest request)
+    {
+        var adapted = ModelToolProtocol.FormatMessages(request);
+        var prompt = FormatPrompt(weights, adapted.SystemPrompt, adapted.Messages);
+        // Some embedded templates already include BOS. Avoid adding it twice.
+        var bos = weights.Vocab.LLamaTokenToString(weights.Vocab.BOS, isSpecialToken: true);
+        var addBos = string.IsNullOrEmpty(bos) || !prompt.StartsWith(bos, StringComparison.Ordinal);
+        return weights.Tokenize(prompt, add_bos: addBos, special: true, Encoding.UTF8);
+    }
 
     private string FormatPrompt(LLamaWeights weights, string systemPrompt, IReadOnlyList<InferenceMessage> messages)
     {

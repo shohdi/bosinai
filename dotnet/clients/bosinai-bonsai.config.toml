@@ -1,0 +1,5 @@
+# Place beside Codex's config.toml; select with --profile bosinai-bonsai.
+# The provider connection is inherited from codex.config.toml's base settings.
+model = "bonsai"
+model_provider = "bosinai"
+model_context_window = 262144

@@ -55,7 +55,7 @@ public sealed class CompatibilityApiTests
         Assert.Equal(0.4f, request.Temperature);
         Assert.Equal("none", request.ToolChoice);
         Assert.Equal("read_file", Assert.Single(request.Tools!).Name);
-        Assert.Equal(0, model.PrepareCalls); // Client history is never silently suffix-trimmed.
+        Assert.Equal(0, model.PrepareCalls); // Structured input uses the backend's full-prompt policy, not web string preprocessing.
     }
 
     [Fact]

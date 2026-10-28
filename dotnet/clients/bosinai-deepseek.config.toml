@@ -1,0 +1,5 @@
+# Place beside Codex's config.toml; select with --profile bosinai-deepseek.
+# Select DeepSeek in the web interface before using this profile.
+model = "deepseek"
+model_provider = "bosinai"
+model_context_window = 57344

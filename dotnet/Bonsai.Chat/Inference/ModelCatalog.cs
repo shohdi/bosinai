@@ -45,7 +45,6 @@ public sealed class ModelCatalog : IChatModel, IAsyncDisposable
             ChatTemplate = original.ChatTemplate,
             ContextSize = original.ContextSize,
             GpuLayerCount = original.GpuLayerCount,
-            MaxTokens = original.MaxTokens,
             SafetyMarginTokens = original.SafetyMarginTokens,
             Temperature = original.Temperature,
             TopP = original.TopP,

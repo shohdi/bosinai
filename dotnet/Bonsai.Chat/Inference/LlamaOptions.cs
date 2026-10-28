@@ -17,9 +17,6 @@ public sealed class LlamaOptions
     [Range(0, int.MaxValue)]
     public int GpuLayerCount { get; set; }
 
-    [Range(1, 131071)]
-    public int MaxTokens { get; set; } = 1800;
-
     [Range(0, 32768)]
     public int SafetyMarginTokens { get; set; } = 128;
 

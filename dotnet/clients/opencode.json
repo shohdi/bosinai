@@ -1,6 +1,10 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "bosinai/local",
+  "model": "bosinai/bonsai",
+  "plugin": ["./opencode-bosinai.js"],
+  "compaction": {
+    "auto": false
+  },
   "provider": {
     "bosinai": {
       "npm": "@ai-sdk/openai-compatible",
@@ -9,11 +13,20 @@
         "baseURL": "http://localhost:5080/v1"
       },
       "models": {
-        "local": {
-          "name": "Model selected in Bosinai",
+        "bonsai": {
+          "name": "Bonsai 2 27B (select in web interface)",
+          "limit": {
+            "context": 262144,
+            "input": 131072,
+            "output": 262016
+          }
+        },
+        "deepseek": {
+          "name": "DeepSeek Coder V2 Lite (select in web interface)",
           "limit": {
             "context": 57344,
-            "output": 1800
+            "input": 28672,
+            "output": 57216
           }
         }
       }
