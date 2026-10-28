@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "bosinai/local",
+  "provider": {
+    "bosinai": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Bosinai local",
+      "options": {
+        "baseURL": "http://localhost:5080/v1"
+      },
+      "models": {
+        "local": {
+          "name": "Model selected in Bosinai",
+          "limit": {
+            "context": 57344,
+            "output": 1800
+          }
+        }
+      }
+    }
+  }
+}

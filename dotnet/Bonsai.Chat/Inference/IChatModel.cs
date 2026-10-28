@@ -13,4 +13,7 @@ public interface IChatModel
     IAsyncEnumerable<string> GenerateAsync(
         IReadOnlyList<InferenceMessage> messages,
         CancellationToken cancellationToken = default);
+
+    IAsyncEnumerable<ModelDelta> CompleteAsync(ModelRequest request, CancellationToken cancellationToken = default)
+        => ModelCompletionFallback.CompleteAsync(this, request, cancellationToken);
 }

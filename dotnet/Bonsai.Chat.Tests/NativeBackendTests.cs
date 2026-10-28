@@ -57,6 +57,8 @@ internal static class NativeBackendProbe
 {
     public static int Main(string[] arguments)
     {
+        if (arguments is ["--compat-api-smoke-host", var directory])
+            return CompatibilityClientProbe.RunAsync(directory).GetAwaiter().GetResult();
         if (!arguments.SequenceEqual(new[] { "--native-backend-smoke" })) return 64;
         try
         {

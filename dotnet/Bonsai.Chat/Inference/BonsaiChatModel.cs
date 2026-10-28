@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace Bonsai.Chat.Inference;
@@ -142,6 +143,133 @@ public sealed class BonsaiChatModel : IChatModel, IAsyncDisposable
         }
         if (!finished)
             throw new InvalidOperationException("The Bonsai response ended before completion. Retry your message; your saved history has been kept intact.");
+    }
+
+    public async IAsyncEnumerable<ModelDelta> CompleteAsync(ModelRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ModelToolProtocol.ValidateRequest(request);
+        var client = await EnsureStartedAsync(cancellationToken);
+        var history = ModelToolProtocol.NormalizeSystemMessages(request.Messages).Select(message =>
+        {
+            var item = new Dictionary<string, object?> { ["role"] = message.Role, ["content"] = message.Content };
+            if (message.ToolCallId is not null) item["tool_call_id"] = message.ToolCallId;
+            if (message.ToolCalls is { Count: > 0 })
+                item["tool_calls"] = message.ToolCalls.Select(call => new
+                {
+                    id = call.Id, type = "function", function = new { name = call.Name, arguments = call.Arguments },
+                }).ToArray();
+            return item;
+        }).ToArray();
+        var maxTokens = Math.Min(request.MaxTokens ?? _options.BonsaiMaxTokens, _options.BonsaiMaxTokens);
+        var body = new Dictionary<string, object?>
+        {
+            ["model"] = "bonsai-local", ["messages"] = history, ["stream"] = true,
+            ["stream_options"] = new { include_usage = true },
+            ["temperature"] = request.Temperature ?? 0.7f, ["top_p"] = 0.8, ["top_k"] = 20, ["min_p"] = 0,
+            ["max_tokens"] = maxTokens, ["cache_prompt"] = false,
+            ["chat_template_kwargs"] = new { enable_thinking = false },
+        };
+        if (request.Tools is { Count: > 0 })
+        {
+            body["tools"] = request.Tools.Select(tool => new
+            {
+                type = "function", function = new { name = tool.Name, description = tool.Description, parameters = tool.Parameters },
+            }).ToArray();
+            body["tool_choice"] = request.ForcedToolName is { } forced
+                ? (object)new { type = "function", function = new { name = forced } } : request.ToolChoice;
+        }
+        // Apply the same native template, including tool definitions, before checking the full context budget.
+        using var templateResponse = await client.PostAsJsonAsync("apply-template", body, cancellationToken);
+        await EnsureSuccessAsync(templateResponse, cancellationToken);
+        using var template = await JsonDocument.ParseAsync(await templateResponse.Content.ReadAsStreamAsync(cancellationToken),
+            cancellationToken: cancellationToken);
+        var prompt = template.RootElement.GetProperty("prompt").GetString();
+        using var tokenResponse = await client.PostAsJsonAsync("tokenize",
+            new { content = prompt, add_special = true }, cancellationToken);
+        await EnsureSuccessAsync(tokenResponse, cancellationToken);
+        using var tokenDocument = await JsonDocument.ParseAsync(await tokenResponse.Content.ReadAsStreamAsync(cancellationToken),
+            cancellationToken: cancellationToken);
+        var inputTokens = tokenDocument.RootElement.GetProperty("tokens").GetArrayLength();
+        var inputBudget = (int)_options.BonsaiContextSize - maxTokens - _safetyMargin;
+        if (inputTokens > inputBudget)
+            throw new InvalidOperationException($"Context full: this request needs {inputTokens:N0} input tokens, " +
+                $"but the safe input limit is {inputBudget:N0}. Reduce the request or compact the client history.");
+
+        using var nativeRequest = new HttpRequestMessage(HttpMethod.Post, "v1/chat/completions")
+        {
+            Content = JsonContent.Create(body),
+        };
+        using var response = await client.SendAsync(nativeRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        await EnsureSuccessAsync(response, cancellationToken);
+        using var reader = new StreamReader(await response.Content.ReadAsStreamAsync(cancellationToken));
+        string? finishReason = null;
+        int? outputTokens = null;
+        var toolCalls = new Dictionary<int, (StringBuilder Name, StringBuilder Arguments)>();
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
+            var payload = line[5..].Trim();
+            if (payload == "[DONE]") break;
+            if (payload.Length == 0) continue;
+            using var document = JsonDocument.Parse(payload);
+            var root = document.RootElement;
+            if (root.TryGetProperty("error", out var error))
+                throw new InvalidOperationException("Bonsai generation failed: " + error);
+            if (root.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
+            {
+                if (usage.TryGetProperty("prompt_tokens", out var input) && input.TryGetInt32(out var inputCount)) inputTokens = inputCount;
+                if (usage.TryGetProperty("completion_tokens", out var output) && output.TryGetInt32(out var outputCount)) outputTokens = outputCount;
+            }
+            if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0) continue;
+            var choice = choices[0];
+            if (choice.TryGetProperty("finish_reason", out var finish) && finish.ValueKind == JsonValueKind.String)
+                finishReason = finish.GetString();
+            if (!choice.TryGetProperty("delta", out var delta)) continue;
+            if (delta.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.String &&
+                content.GetString() is { Length: > 0 } text)
+                yield return new ModelDelta(Text: text);
+            if (!delta.TryGetProperty("tool_calls", out var calls) || calls.ValueKind != JsonValueKind.Array) continue;
+            foreach (var call in calls.EnumerateArray())
+            {
+                var index = call.TryGetProperty("index", out var indexValue) ? indexValue.GetInt32() : 0;
+                var id = call.TryGetProperty("id", out var idValue) && idValue.ValueKind == JsonValueKind.String ? idValue.GetString() : null;
+                string? name = null;
+                string? arguments = null;
+                if (call.TryGetProperty("function", out var function))
+                {
+                    if (function.TryGetProperty("name", out var nameValue) && nameValue.ValueKind == JsonValueKind.String) name = nameValue.GetString();
+                    if (function.TryGetProperty("arguments", out var argumentValue) && argumentValue.ValueKind == JsonValueKind.String) arguments = argumentValue.GetString();
+                }
+                if (!toolCalls.TryGetValue(index, out var accumulated))
+                    toolCalls[index] = accumulated = (new StringBuilder(), new StringBuilder());
+                accumulated.Name.Append(name);
+                accumulated.Arguments.Append(arguments);
+                yield return new ModelDelta(ToolIndex: index, ToolCallId: id, ToolName: name, Arguments: arguments);
+            }
+        }
+        if (string.IsNullOrEmpty(finishReason))
+            throw new InvalidOperationException("The Bonsai response ended before completion. Retry the request.");
+        if (toolCalls.Count > 0 && request.ToolChoice == "none")
+            throw new InvalidOperationException("The local model returned a tool call when tools were disabled.");
+        if (request.Tools is { Count: > 0 } && request.ToolChoice != "none")
+        {
+            var completeCalls = JsonSerializer.Serialize(new
+            {
+                tool_calls = toolCalls.OrderBy(pair => pair.Key).Select(pair => new
+                {
+                    name = pair.Value.Name.ToString(), arguments = pair.Value.Arguments.ToString(),
+                }),
+            });
+            // Validate names, argument JSON, required parameters, and forced choices before announcing completion.
+            ModelToolProtocol.ParseResponse(completeCalls, request);
+        }
+        else if (toolCalls.Count > 0)
+            throw new InvalidOperationException("The local model returned a tool call without supplied tool definitions.");
+        if (toolCalls.Count > 0 && finishReason == "stop") finishReason = "tool_calls";
+        yield return new ModelDelta(FinishReason: finishReason, InputTokens: inputTokens, OutputTokens: outputTokens);
     }
 
     private async Task<HttpClient> EnsureStartedAsync(CancellationToken cancellationToken)

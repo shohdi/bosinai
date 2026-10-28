@@ -3,12 +3,11 @@ using Bonsai.Chat.Inference;
 
 namespace Bonsai.Chat.Chat;
 
-public sealed class ChatCoordinator(SessionStore store, IChatModel model,
+public sealed class ChatCoordinator(SessionStore store, IChatModel model, SharedInferenceService inference,
     ILogger<ChatCoordinator> logger) : IHostedService, IDisposable
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, Generation> _jobs = new();
-    private readonly SemaphoreSlim _modelSlot = new(1, 1);
     private bool _stopping;
     private bool _switching;
 
@@ -79,14 +78,13 @@ public sealed class ChatCoordinator(SessionStore store, IChatModel model,
             if (_stopping) throw new ChatApiException(503, "The server is shutting down. Retry after restarting it.");
             if (_switching) throw new ChatApiException(409, "The model is switching. Try sending again in a moment.");
             RequireIdle(id);
-            if (_jobs.Values.Count(j => j.Active) >= 8)
-                throw new ChatApiException(429, "The model queue is full. Wait for a reply to finish.");
+            var reservation = inference.Reserve();
             // Take the file lease before accepting the job, so concurrent app instances cannot
             // produce two replies against the same history snapshot.
-            var lease = store.AcquireLease(id);
+            IDisposable? lease = null;
             SessionData data;
-            try { data = store.Read(id); }
-            catch { lease.Dispose(); throw; }
+            try { lease = store.AcquireLease(id); data = store.Read(id); }
+            catch { lease?.Dispose(); reservation.Dispose(); throw; }
             foreach (var old in _jobs.Values.Where(j => !j.Active).SkipLast(99).ToArray())
             {
                 _jobs.Remove(old.Id);
@@ -94,7 +92,7 @@ public sealed class ChatCoordinator(SessionStore store, IChatModel model,
             }
             var job = new Generation(id, content);
             _jobs.Add(job.Id, job);
-            job.Completion = Task.Run(() => GenerateAsync(job, data, lease));
+            job.Completion = Task.Run(() => GenerateAsync(job, data, lease, reservation));
             return job.View();
         }
     }
@@ -108,14 +106,14 @@ public sealed class ChatCoordinator(SessionStore store, IChatModel model,
     {
         lock (_gate)
         {
-            if (_switching || _jobs.Values.Any(job => job.Active))
+            if (_switching || _jobs.Values.Any(job => job.Active) || inference.ActiveCount != 0)
                 throw new ChatApiException(409, "Stop active replies or wait for them to finish before switching models.");
             var selected = catalog.ListModels().FirstOrDefault(item => item.Id == id);
             if (selected is null) throw new ChatApiException(400, "Unknown model.");
             if (!selected.Available) throw new ChatApiException(400, selected.Message);
             _switching = true;
         }
-        try { await catalog.SelectAsync(id, cancellationToken); }
+        try { await inference.SelectModelAsync(id, cancellationToken); }
         finally { lock (_gate) _switching = false; }
     }
     private Generation Find(string id) => _jobs.TryGetValue(id, out var job) ? job
@@ -133,16 +131,16 @@ public sealed class ChatCoordinator(SessionStore store, IChatModel model,
         lock (_gate) return job.View();
     }
 
-    private async Task GenerateAsync(Generation job, SessionData data, IDisposable lease)
+    private async Task GenerateAsync(Generation job, SessionData data, IDisposable lease,
+        SharedInferenceService.Reservation reservation)
     {
-        var entered = false;
         var token = job.Cancellation.Token;
         var finalStatus = "failed";
         var finalProgress = "Reply failed.";
         try
         {
-            await _modelSlot.WaitAsync(token);
-            entered = true;
+            await reservation.EnterAsync(token);
+            token = reservation.Token;
             lock (_gate)
             {
                 token.ThrowIfCancellationRequested();
@@ -184,7 +182,7 @@ public sealed class ChatCoordinator(SessionStore store, IChatModel model,
                 finalProgress = "Reply saved.";
             }
         }
-        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        catch (OperationCanceledException) when (token.IsCancellationRequested || reservation.Token.IsCancellationRequested)
         {
             finalStatus = "cancelled";
             finalProgress = "Stopped. Your completed conversation is saved.";
@@ -205,10 +203,10 @@ public sealed class ChatCoordinator(SessionStore store, IChatModel model,
             lock (_gate)
             {
                 lease.Dispose();
+                reservation.Dispose();
                 job.Status = finalStatus;
                 job.Progress = finalProgress;
             }
-            if (entered) _modelSlot.Release();
         }
     }
 
@@ -227,6 +225,5 @@ public sealed class ChatCoordinator(SessionStore store, IChatModel model,
     public void Dispose()
     {
         foreach (var job in _jobs.Values) job.Cancellation.Dispose();
-        _modelSlot.Dispose();
     }
 }

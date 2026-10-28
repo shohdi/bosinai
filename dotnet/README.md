@@ -24,6 +24,12 @@ The provisioned Windows site is in `Published`, with its own .NET/ASP.NET Core
 8.0.33 runtime. It runs without the .NET SDK. Its conversations and model selection
 are stored in `Published/App_Data`; the source project uses its own `App_Data`.
 The app listens on <http://localhost:5080>. `Start-Chat.cmd` launches the site.
+The same server exposes `GET /v1/models`, `POST /v1/responses` for Codex CLI,
+and `POST /v1/chat/completions` for OpenCode. Browser and API turns share a
+single bounded queue and the same loaded model. Use model ID `local` to follow
+the web interface's selection. [Coding client examples](clients/README.md)
+include configuration and the supported text/tool protocols. API conversations
+are separate from saved web chats; no second inference server is required.
 The `.sln` includes the web project and integration tests. Configuration is in
 `Bonsai.Chat/appsettings.json`; all paths are resolved against the C# project,
 not the shell's working directory. No browser assets require a CDN.

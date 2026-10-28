@@ -2,6 +2,11 @@
 
 This project runs the requested **Ternary-Bonsai-2-27B-PTQ1_0.gguf** on the local RTX 4060, with two real stdio MCP servers and a five-minute agent loop. It supports autonomous research and **simulated trading only**. It does **not** autonomously invest real funds, store a wallet private key, or sign/broadcast transactions. Live proposals require manual review and execution in your own wallet through 1inch.
 
+For the independent ASP.NET Core chat interface and shared Codex CLI/OpenCode
+API, see [the .NET application](dotnet/README.md) and
+[coding client configuration](dotnet/clients/README.md). They run in one .NET
+server and share one loaded model.
+
 ## Installed here
 
 - Project-local Python 3.12 `.venv`; existing Conda environments unchanged.

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Bonsai.Chat;
+using Bonsai.Chat.Api;
 using Bonsai.Chat.Chat;
 using Bonsai.Chat.Inference;
 
@@ -13,6 +14,7 @@ builder.Services.Configure<LlamaOptions>(builder.Configuration.GetSection("Llama
 builder.Services.Configure<ModelCatalogOptions>(builder.Configuration.GetSection("Models"));
 builder.Services.AddSingleton<ModelCatalog>();
 builder.Services.AddSingleton<IChatModel>(services => services.GetRequiredService<ModelCatalog>());
+builder.Services.AddSingleton<SharedInferenceService>();
 builder.Services.AddSingleton<SessionStore>();
 builder.Services.AddSingleton<ChatCoordinator>();
 builder.Services.AddHostedService(services => services.GetRequiredService<ChatCoordinator>());
@@ -24,7 +26,10 @@ app.Use(async (context, next) =>
     catch (ChatApiException error)
     {
         context.Response.StatusCode = error.StatusCode;
-        await context.Response.WriteAsJsonAsync(new { error = error.Message });
+        if (context.Request.Path.StartsWithSegments("/v1"))
+            await context.Response.WriteAsJsonAsync(new { error = new { message = error.Message,
+                type = "invalid_request_error", param = (string?)null, code = "invalid_request" } });
+        else await context.Response.WriteAsJsonAsync(new { error = error.Message });
     }
     catch (BadHttpRequestException error)
     {
@@ -42,7 +47,7 @@ app.UseMiddleware<LocalBrowserMiddleware>();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
-app.MapGet("/api/status", (IChatModel model, ModelCatalog catalog, ChatCoordinator chats) =>
+app.MapGet("/api/status", (IChatModel model, ModelCatalog catalog, ChatCoordinator chats, SharedInferenceService inference) =>
 {
     var status = model.GetStatus();
     return Results.Ok(new
@@ -50,6 +55,7 @@ app.MapGet("/api/status", (IChatModel model, ModelCatalog catalog, ChatCoordinat
         model = new { name = status.ModelName, online = status.IsReady, state = status.State, message = status.Message,
             context_size = catalog.SelectedContextSize },
         active_jobs = chats.ActiveJobs(),
+        active_requests = inference.ActiveCount,
         selected_model_id = catalog.SelectedId
     });
 });
@@ -101,6 +107,7 @@ app.MapGet("/api/jobs/{id}", (string id, ChatCoordinator chats) => Results.Ok(ne
 app.MapPost("/api/jobs/{id}/cancel", async (string id, ChatCoordinator chats) =>
     Results.Ok(new { job = await chats.CancelAsync(id) }));
 app.MapFallback("/api/{**path}", () => Results.NotFound(new { error = "API endpoint not found." }));
+ApiEndpoints.MapOpenAiApi(app);
 
 app.Run();
 

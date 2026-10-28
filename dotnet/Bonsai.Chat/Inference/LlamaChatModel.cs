@@ -151,6 +151,89 @@ public sealed class LlamaChatModel : IChatModel, IAsyncDisposable
         }
     }
 
+    public async IAsyncEnumerable<ModelDelta> CompleteAsync(ModelRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ModelToolProtocol.ValidateRequest(request);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var weights = await LoadAsync(cancellationToken);
+            // Agent instructions belong to this request; the web chat's default prompt is not injected.
+            var adapted = ModelToolProtocol.FormatMessages(request);
+            var prompt = FormatPrompt(weights, adapted.SystemPrompt, adapted.Messages);
+            var maxTokens = Math.Min(request.MaxTokens ?? _options.MaxTokens, _options.MaxTokens);
+            var bos = weights.Vocab.LLamaTokenToString(weights.Vocab.BOS, isSpecialToken: true);
+            var addBos = string.IsNullOrEmpty(bos) || !prompt.StartsWith(bos, StringComparison.Ordinal);
+            var tokens = weights.Tokenize(prompt, add_bos: addBos, special: true, Encoding.UTF8);
+            var inputBudget = (int)_options.ContextSize - maxTokens - _options.SafetyMarginTokens;
+            if (tokens.Length > inputBudget)
+                throw new InvalidOperationException($"Context full: this request needs {tokens.Length:N0} input tokens, " +
+                    $"but the safe input limit is {inputBudget:N0}. Reduce the request or compact the client history.");
+
+            cancellationToken.ThrowIfCancellationRequested();
+            using var context = weights.CreateContext(CreateParameters(), _logger);
+            using var sampling = new DefaultSamplingPipeline
+            {
+                Temperature = request.Temperature ?? _options.Temperature,
+                TopP = _options.TopP,
+            };
+            var batch = new LLamaBatch();
+            var decoder = new StreamingTokenDecoder(context) { DecodeSpecialTokens = false };
+            var batchSize = (int)context.BatchSize;
+            for (var offset = 0; offset < tokens.Length; offset += batchSize)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                batch.Clear();
+                var end = Math.Min(offset + batchSize, tokens.Length);
+                for (var index = offset; index < end; index++)
+                    batch.Add(tokens[index], index, LLamaSeqId.Zero, logits: index == tokens.Length - 1);
+                await DecodeAsync(context, batch, cancellationToken);
+            }
+            var useTools = request.Tools is { Count: > 0 } && request.ToolChoice != "none";
+            var buffered = new StringBuilder();
+            var outputTokens = 0;
+            var stopped = false;
+            var position = tokens.Length;
+            for (var generated = 0; generated < maxTokens; generated++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var token = sampling.Sample(context.NativeHandle, batch.TokenCount - 1);
+                if (token.IsEndOfGeneration(weights.Vocab))
+                {
+                    stopped = true;
+                    break;
+                }
+                outputTokens++;
+                decoder.Add(token);
+                var chunk = decoder.Read();
+                if (chunk.Length > 0)
+                {
+                    if (useTools) buffered.Append(chunk);
+                    else yield return new ModelDelta(Text: chunk);
+                }
+                if (generated + 1 == maxTokens) break;
+                cancellationToken.ThrowIfCancellationRequested();
+                batch.Clear();
+                batch.Add(token, position++, LLamaSeqId.Zero, logits: true);
+                await DecodeAsync(context, batch, cancellationToken);
+            }
+            if (useTools)
+            {
+                foreach (var delta in ModelToolProtocol.ParseResponse(buffered.ToString(), request))
+                    yield return delta.FinishReason is null ? delta : delta with
+                    {
+                        FinishReason = delta.FinishReason == "stop" && !stopped ? "length" : delta.FinishReason,
+                        InputTokens = tokens.Length, OutputTokens = outputTokens,
+                    };
+            }
+            else yield return new ModelDelta(FinishReason: stopped ? "stop" : "length",
+                InputTokens: tokens.Length, OutputTokens: outputTokens);
+        }
+        finally { _gate.Release(); }
+    }
+
     private async Task<LLamaWeights> LoadAsync(CancellationToken cancellationToken)
     {
         if (_weights is not null)
@@ -208,13 +291,16 @@ public sealed class LlamaChatModel : IChatModel, IAsyncDisposable
     };
 
     private string FormatPrompt(LLamaWeights weights, IReadOnlyList<InferenceMessage> messages)
+        => FormatPrompt(weights, _options.SystemPrompt, messages);
+
+    private string FormatPrompt(LLamaWeights weights, string systemPrompt, IReadOnlyList<InferenceMessage> messages)
     {
         if (_options.ChatTemplate == "DeepSeekCoderV2")
-            return DeepSeekPrompt.Format(_options.SystemPrompt, messages);
+            return DeepSeekPrompt.Format(systemPrompt, messages);
 
         var template = new LLamaTemplate(weights) { AddAssistant = true };
-        if (!string.IsNullOrWhiteSpace(_options.SystemPrompt))
-            template.Add("system", _options.SystemPrompt);
+        if (!string.IsNullOrWhiteSpace(systemPrompt))
+            template.Add("system", systemPrompt);
         foreach (var message in messages)
             template.Add(message.Role, message.Content);
         return PromptTemplateTransformer.ToModelPrompt(template);

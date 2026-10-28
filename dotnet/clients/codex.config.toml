@@ -1,0 +1,17 @@
+# Use this as a separate Codex config/profile. The API shares the model selected in the web UI.
+model = "local"
+model_provider = "bosinai"
+# Safe for either current model. For Bonsai-only sessions, use its context_window from /v1/models.
+model_context_window = 57344
+web_search = "disabled"
+
+[model_providers.bosinai]
+name = "Bosinai local"
+base_url = "http://localhost:5080/v1"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+stream_idle_timeout_ms = 600000
+
+[model_providers.bosinai.capabilities]
+remote_compaction = "unsupported"

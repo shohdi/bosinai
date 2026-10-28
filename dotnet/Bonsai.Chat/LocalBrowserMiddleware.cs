@@ -36,7 +36,8 @@ public sealed class LocalBrowserMiddleware(RequestDelegate next)
         context.Response.Headers["Referrer-Policy"] = "no-referrer";
         context.Response.Headers["Content-Security-Policy"] =
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
-        if (request.Path.StartsWithSegments("/api")) context.Response.Headers.CacheControl = "no-store";
+        if (request.Path.StartsWithSegments("/api") || request.Path.StartsWithSegments("/v1"))
+            context.Response.Headers.CacheControl = "no-store";
         await next(context);
     }
 }

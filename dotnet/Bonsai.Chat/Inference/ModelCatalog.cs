@@ -167,6 +167,19 @@ public sealed class ModelCatalog : IChatModel, IAsyncDisposable
         finally { _gate.Release(); }
     }
 
+    public async IAsyncEnumerable<ModelDelta> CompleteAsync(ModelRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            await foreach (var delta in _active.CompleteAsync(request, cancellationToken))
+                yield return delta;
+        }
+        finally { _gate.Release(); }
+    }
+
     private IChatModel CreateModel(string id) => id == "deepseek"
         ? new LlamaChatModel(Options.Create(_deepSeekOptions), _environment, _loggers.CreateLogger<LlamaChatModel>())
         : new BonsaiChatModel(_bonsaiModelPath, _bonsaiRuntimePath,
