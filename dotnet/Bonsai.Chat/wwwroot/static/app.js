@@ -150,7 +150,7 @@
     if (!valid) return;
     const label = size >= 1024 ? `${(size / 1024).toLocaleString(undefined, { maximumFractionDigits: 1 })}K` : size.toLocaleString();
     ui.modelContext.textContent = `${label} context · `;
-    ui.modelContext.title = `${size.toLocaleString()} tokens of context`;
+    ui.modelContext.title = `${size.toLocaleString()} tokens of context. Input keeps the last ${Math.floor(size / 2).toLocaleString()} tokens when longer.`;
   }
 
   async function loadModels() {
@@ -550,7 +550,8 @@
       state.pending.set(job.session_id, { content: job.content || '', jobId: job.id });
       if (!existing) renderSessions();
     }
-    if (job.session_id === state.selectedId && job.response !== previous?.response) renderConversation();
+    if (job.session_id === state.selectedId
+      && (job.response !== previous?.response || job.content !== previous?.content)) renderConversation();
     updateComposer();
   }
 
@@ -646,10 +647,6 @@
     event?.preventDefault();
     const content = ui.input.value.trim();
     if (!content || state.sending || state.loading || state.switchingModel || currentJob()) return;
-    if (content.length > 100000) {
-      notify('This message is too long. Use at most 100,000 characters.');
-      return;
-    }
     saveDraft();
     clearNotification();
     state.sending = true;
@@ -694,7 +691,8 @@
           renderConversation(true);
         } else if (result?.session.messages?.length > previousMessageCount
           && result.session.messages.at(-2)?.role === 'user'
-          && result.session.messages.at(-2)?.content.trim() === content
+          && result.session.messages.at(-2)?.content.trim()
+          && content.endsWith(result.session.messages.at(-2).content.trim())
           && result.session.messages.at(-1)?.role === 'assistant') {
           state.session = result.session;
           state.drafts.set(id, '');

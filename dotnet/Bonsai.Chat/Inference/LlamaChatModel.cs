@@ -56,6 +56,24 @@ public sealed class LlamaChatModel : IChatModel, IAsyncDisposable
             : status;
     }
 
+    public async Task<string> PrepareInputAsync(string content, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var weights = await LoadAsync(cancellationToken);
+            return await InputTailLimiter.KeepTailAsync(content, (int)(_options.ContextSize / 2),
+                (text, token) =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    return Task.FromResult(weights.Tokenize(text, add_bos: false, special: true, Encoding.UTF8).Length);
+                }, cancellationToken);
+        }
+        finally { _gate.Release(); }
+    }
+
     public async IAsyncEnumerable<string> GenerateAsync(
         IReadOnlyList<InferenceMessage> messages,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)

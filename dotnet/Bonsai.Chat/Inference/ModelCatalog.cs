@@ -143,6 +143,17 @@ public sealed class ModelCatalog : IChatModel, IAsyncDisposable
         finally { _gate.Release(); }
     }
 
+    public async Task<string> PrepareInputAsync(string content, CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return await _active.PrepareInputAsync(content, cancellationToken);
+        }
+        finally { _gate.Release(); }
+    }
+
     public async IAsyncEnumerable<string> GenerateAsync(IReadOnlyList<InferenceMessage> messages,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {

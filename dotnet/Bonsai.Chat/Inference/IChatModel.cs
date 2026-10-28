@@ -8,6 +8,8 @@ public interface IChatModel
 {
     ModelStatus GetStatus();
 
+    Task<string> PrepareInputAsync(string content, CancellationToken cancellationToken = default);
+
     IAsyncEnumerable<string> GenerateAsync(
         IReadOnlyList<InferenceMessage> messages,
         CancellationToken cancellationToken = default);

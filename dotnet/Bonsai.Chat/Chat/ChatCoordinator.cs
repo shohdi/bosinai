@@ -16,7 +16,7 @@ public sealed class ChatCoordinator(SessionStore store, IChatModel model,
     {
         public string Id { get; } = Guid.NewGuid().ToString("N");
         public string SessionId { get; } = sessionId;
-        public string Content { get; } = content;
+        public string Content { get; set; } = content;
         public string Status { get; set; } = "pending";
         public string Progress { get; set; } = "Waiting for the local model…";
         public string? Error { get; set; }
@@ -148,6 +148,16 @@ public sealed class ChatCoordinator(SessionStore store, IChatModel model,
                 token.ThrowIfCancellationRequested();
                 job.Status = "running";
                 job.Progress = "Loading model / processing conversation…";
+            }
+            var prepared = await model.PrepareInputAsync(job.Content, token);
+            lock (_gate)
+            {
+                token.ThrowIfCancellationRequested();
+                var trimmed = prepared != job.Content;
+                job.Content = prepared;
+                job.Progress = trimmed
+                    ? "Older input trimmed. Processing the end of your message…"
+                    : "Processing conversation…";
             }
             var messages = SessionStore.VisibleMessages(data)
                 .Select(m => new InferenceMessage(m.Role, m.Content)).ToList();

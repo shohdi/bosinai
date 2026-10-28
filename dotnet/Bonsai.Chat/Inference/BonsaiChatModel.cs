@@ -59,6 +59,23 @@ public sealed class BonsaiChatModel : IChatModel, IAsyncDisposable
         return Volatile.Read(ref _status);
     }
 
+    public async Task<string> PrepareInputAsync(string content, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var client = await EnsureStartedAsync(cancellationToken);
+        return await InputTailLimiter.KeepTailAsync(content, (int)(_options.BonsaiContextSize / 2),
+            async (text, token) =>
+            {
+                using var response = await client.PostAsJsonAsync("tokenize",
+                    new { content = text, add_special = false, parse_special = true }, token);
+                await EnsureSuccessAsync(response, token);
+                using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(token),
+                    cancellationToken: token);
+                return document.RootElement.GetProperty("tokens").GetArrayLength();
+            }, cancellationToken);
+    }
+
     public async IAsyncEnumerable<string> GenerateAsync(IReadOnlyList<InferenceMessage> messages,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {

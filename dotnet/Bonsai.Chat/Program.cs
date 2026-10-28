@@ -3,8 +3,9 @@ using Bonsai.Chat;
 using Bonsai.Chat.Chat;
 using Bonsai.Chat.Inference;
 
+const int MaxMessageBodyBytes = 16 * 1024 * 1024;
 var builder = WebApplication.CreateBuilder(args);
-builder.WebHost.ConfigureKestrel(server => server.Limits.MaxRequestBodySize = 256_000);
+builder.WebHost.ConfigureKestrel(server => server.Limits.MaxRequestBodySize = MaxMessageBodyBytes);
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower);
 builder.Services.Configure<ChatOptions>(builder.Configuration.GetSection("Chat"));
@@ -90,10 +91,10 @@ app.MapDelete("/api/sessions/{id}", (string id, ChatCoordinator chats) =>
 });
 app.MapPost("/api/sessions/{id}/messages", async (string id, HttpRequest request, ChatCoordinator chats) =>
 {
-    using var body = await ReadObjectAsync(request);
+    using var body = await ReadObjectAsync(request, MaxMessageBodyBytes);
     if (!body.RootElement.TryGetProperty("content", out var value) || value.ValueKind != JsonValueKind.String
-        || string.IsNullOrWhiteSpace(value.GetString()) || value.GetString()!.Length > 100_000)
-        throw new ChatApiException(400, "Message must contain 1–100,000 characters.");
+        || string.IsNullOrWhiteSpace(value.GetString()))
+        throw new ChatApiException(400, "Message must contain text.");
     return Results.Json(new { job = chats.Send(id, value.GetString()!) }, statusCode: 202);
 });
 app.MapGet("/api/jobs/{id}", (string id, ChatCoordinator chats) => Results.Ok(new { job = chats.GetJob(id) }));
@@ -111,17 +112,17 @@ static string ValidTitle(JsonElement value)
     return value.GetString()!.Trim();
 }
 
-static async Task<JsonDocument> ReadObjectAsync(HttpRequest request)
+static async Task<JsonDocument> ReadObjectAsync(HttpRequest request, int maxBytes = 256_000)
 {
     if (!string.Equals(request.ContentType?.Split(';')[0].Trim(), "application/json", StringComparison.OrdinalIgnoreCase))
         throw new ChatApiException(415, "Send an application/json request.");
-    if (request.ContentLength > 256_000) throw new ChatApiException(413, "Message is too large.");
+    if (request.ContentLength > maxBytes) throw new ChatApiException(413, "Message is too large.");
     using var buffer = new MemoryStream();
     var chunk = new byte[8192];
     int count;
     while ((count = await request.Body.ReadAsync(chunk, request.HttpContext.RequestAborted)) > 0)
     {
-        if (buffer.Length + count > 256_000) throw new ChatApiException(413, "Message is too large.");
+        if (buffer.Length + count > maxBytes) throw new ChatApiException(413, "Message is too large.");
         buffer.Write(chunk, 0, count);
     }
     try

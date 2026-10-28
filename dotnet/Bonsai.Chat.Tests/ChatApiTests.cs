@@ -86,6 +86,95 @@ public sealed class ChatApiTests
     }
 
     [Fact]
+    public async Task LongMessageUsesPreparedSuffixInGenerationAndPersistedHistory()
+    {
+        using var directory = new HistoryDirectory();
+        const string suffix = "Keep the latest instructions 🧠";
+        var input = "Discard this old prefix. " + new string('x', 300_000) + "\n" + suffix;
+        var model = new FakeChatModel();
+        string? preparedInput = null;
+        model.Prepare = (content, _) =>
+        {
+            preparedInput = content;
+            return Task.FromResult(content[^suffix.Length..]);
+        };
+        string id;
+        using (var app = new ChatApplication(directory.Path, model))
+        using (var client = app.CreateLocalClient())
+        {
+            id = (await CreateSession(client, "Long input")).GetProperty("id").GetString()!;
+            var completed = await FinishJob(client, await Send(client, id, input));
+            Assert.Equal("completed", completed.GetProperty("status").GetString());
+            Assert.Equal(input, preparedInput);
+            Assert.Equal(suffix, completed.GetProperty("content").GetString());
+            Assert.Equal(suffix, Assert.Single(model.Histories).Single().Content);
+            Assert.Equal(suffix, completed.GetProperty("session").GetProperty("messages")[0].GetProperty("content").GetString());
+        }
+
+        using var restarted = new ChatApplication(directory.Path);
+        using var restartedClient = restarted.CreateLocalClient();
+        var saved = (await GetJson(restartedClient, $"/api/sessions/{id}")).GetProperty("session");
+        Assert.Equal(suffix, saved.GetProperty("messages")[0].GetProperty("content").GetString());
+        Assert.Equal(Reply, saved.GetProperty("messages")[1].GetProperty("content").GetString());
+    }
+
+    [Fact]
+    public async Task InputPreparationChangesOnlyTheNewMessageAndPreservesEarlierHistory()
+    {
+        using var directory = new HistoryDirectory();
+        var model = new FakeChatModel();
+        using var app = new ChatApplication(directory.Path, model);
+        using var client = app.CreateLocalClient();
+        var id = (await CreateSession(client)).GetProperty("id").GetString()!;
+        await FinishJob(client, await Send(client, id, "Keep my earlier request."));
+        model.Prepare = (content, _) => Task.FromResult(content[content.IndexOf("latest", StringComparison.Ordinal)..]);
+
+        var completed = await FinishJob(client, await Send(client, id, "Discard this beginning; latest instruction."));
+
+        Assert.Equal("completed", completed.GetProperty("status").GetString());
+        Assert.Equal(new[]
+        {
+            new InferenceMessage("user", "Keep my earlier request."),
+            new InferenceMessage("assistant", Reply),
+            new InferenceMessage("user", "latest instruction.")
+        }, model.Histories[1]);
+        var messages = completed.GetProperty("session").GetProperty("messages");
+        Assert.Equal("Keep my earlier request.", messages[0].GetProperty("content").GetString());
+        Assert.Equal("latest instruction.", messages[2].GetProperty("content").GetString());
+    }
+
+    [Fact]
+    public async Task CancellingInputPreparationPreservesHistoryAndReleasesTheConversation()
+    {
+        using var directory = new HistoryDirectory();
+        var model = new FakeChatModel();
+        using var app = new ChatApplication(directory.Path, model);
+        using var client = app.CreateLocalClient();
+        var id = (await CreateSession(client)).GetProperty("id").GetString()!;
+        await FinishJob(client, await Send(client, id, "Saved request"));
+        var before = (await GetJson(client, $"/api/sessions/{id}")).GetProperty("session").GetProperty("messages").GetRawText();
+        var preparationStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        model.Prepare = async (content, cancellationToken) =>
+        {
+            preparationStarted.TrySetResult();
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return content;
+        };
+        var jobId = await Send(client, id, "Cancel before inference starts");
+        await preparationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        using var cancelled = await client.PostAsync($"/api/jobs/{jobId}/cancel", null);
+        Assert.Equal("cancelled", (await ReadJson(cancelled)).GetProperty("job").GetProperty("status").GetString());
+        Assert.Single(model.Histories);
+        var saved = (await GetJson(client, $"/api/sessions/{id}")).GetProperty("session");
+        Assert.Equal(before, saved.GetProperty("messages").GetRawText());
+        Assert.Equal(JsonValueKind.Null, saved.GetProperty("active_job").ValueKind);
+
+        model.Prepare = null;
+        Assert.Equal("completed", (await FinishJob(client, await Send(client, id, "Retry"))).GetProperty("status").GetString());
+    }
+
+    [Fact]
     public async Task StopRejectsBusyMutationsAndNeverCommitsPartialTurn()
     {
         using var directory = new HistoryDirectory();
@@ -281,7 +370,7 @@ public sealed class ChatApiTests
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, (await client.PostAsJsonAsync("/api/sessions", new { title = new string('x', 256_001) })).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/sessions", new { title = new string('x', 121) })).StatusCode);
         var id = (await CreateSession(client)).GetProperty("id").GetString()!;
-        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync($"/api/sessions/{id}/messages", new { content = new string('x', 100_001) })).StatusCode);
+        Assert.Equal("completed", (await FinishJob(client, await Send(client, id, new string('x', 100_001)))).GetProperty("status").GetString());
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/sessions/missing")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/jobs/missing")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsync("/api/jobs/missing/cancel", null)).StatusCode);
@@ -583,9 +672,16 @@ public sealed class ChatApiTests
     private sealed class FakeChatModel : IChatModel
     {
         public ReplyMode Mode { get; set; }
+        public Func<string, CancellationToken, Task<string>>? Prepare { get; set; }
         public List<InferenceMessage[]> Histories { get; } = [];
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public ModelStatus GetStatus() => new("ready", "Test GGUF", "Ready", true);
+
+        public Task<string> PrepareInputAsync(string content, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Prepare?.Invoke(content, cancellationToken) ?? Task.FromResult(content);
+        }
 
         public async IAsyncEnumerable<string> GenerateAsync(IReadOnlyList<InferenceMessage> messages,
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
