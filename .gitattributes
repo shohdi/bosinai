@@ -1,0 +1,2 @@
+# Keep Mac launchers runnable after a clone, including from Windows checkouts.
+*.sh text eol=lf

@@ -1,5 +1,9 @@
 # Bonsai Chat for ASP.NET Core
 
+For Bonsai on Apple Silicon with Metal acceleration, follow the separate
+[macOS build and launch instructions](MACOS.md). The Mac scripts publish into
+`Published-Mac` and leave the Windows launch path and settings unchanged.
+
 An independent C# chat application. It does not import, launch, or require Python,
 the original chat server, its MCP services, or its configuration.
 
@@ -47,11 +51,13 @@ reserve, without a fixed 1,800-token cap. An explicit API response maximum is
 respected. The web chat has no browsing tools. The local API accepts only loopback
 hostnames and rejects foreign browser origins.
 
-The configured context windows are 57,344 for DeepSeek and 262,144 for Bonsai,
-with input budgets of 28,672 and 131,072 respectively. The client examples
-advertise each model's full window. These context allocations were verified
+The checked-in context windows are 57,344 for both models, with input budgets of
+28,672 each. The previously provisioned Windows Bonsai profile and coding-client
+examples use 262,144 tokens (131,072 input); that larger profile was verified
 with real cache allocations and replies on this PC. The interface shows the
-current limit. [Context verification](CONTEXT.md) records placement and headroom.
+effective current limit. [Context verification](CONTEXT.md) records that Windows
+profile's placement and headroom; [macOS instructions](MACOS.md) explain how to
+select either size without editing the shared settings.
 
 Validation: `dotnet test Bonsai.sln`. Tests replace inference with a controlled
 model to exercise persistence, concurrent sends, bounded admission, cancellation,

@@ -82,7 +82,7 @@ public sealed class ModelCatalog : IChatModel, IAsyncDisposable
         new("deepseek", _deepSeekOptions.ModelName, "LLamaSharp · CPU",
             File.Exists(_deepSeekOptions.ModelPath), File.Exists(_deepSeekOptions.ModelPath)
                 ? "Local coding model · Q4_K_M" : "DeepSeek GGUF file is missing", _deepSeekOptions.ContextSize),
-        new("bonsai", "Ternary Bonsai 2 · 27B", "Prism llama.cpp · CUDA",
+        new("bonsai", "Ternary Bonsai 2 · 27B", OperatingSystem.IsMacOS() ? "Prism llama.cpp · Metal" : "Prism llama.cpp · CUDA",
             File.Exists(_bonsaiModelPath) && File.Exists(_bonsaiRuntimePath),
             !File.Exists(_bonsaiModelPath) ? "Bonsai GGUF file is missing" : !File.Exists(_bonsaiRuntimePath)
                 ? "Bonsai native runtime is missing" : "Local general assistant · PTQ1_0", _options.BonsaiContextSize),
